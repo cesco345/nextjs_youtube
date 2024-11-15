@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpenCV.js Test</title>
+</head>
+<body>
+    <h2>OpenCV.js Test</h2>
+    <p id="status">OpenCV.js is: <span style="color:red">NOT LOADED</span></p>
+    <img id="imageSrc" src="/api/placeholder/400/320" alt="placeholder">
+    <canvas id="canvasOutput"></canvas>
+
+    <script src="opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    
+    <script>
+        function onOpenCvReady() {
+            document.getElementById('status').innerHTML = 
+                'OpenCV.js is: <span style="color:green">LOADED</span>';
+            
+            let src = cv.imread('imageSrc');
+            let dst = new cv.Mat();
+            
+            // Simple Canny edge detection
+            cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY);
+            cv.Canny(src, dst, 50, 150);
+            
+            cv.imshow('canvasOutput', dst);
+            
+            src.delete();
+            dst.delete();
+        }
+    </script>
+</body>
+</html>

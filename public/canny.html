@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpenCV.js Test</title>
+</head>
+<body>
+    <h2>OpenCV.js Test</h2>
+    <p id="status">OpenCV.js is: <span style="color:red">NOT LOADED</span></p>
+    <div>
+        <div>Original:
+            <img id="imageSrc" src="shapes.webp" alt="Shapes">
+        </div>
+        <div>Processed:
+            <canvas id="canvasOutput"></canvas>
+        </div>
+    </div>
+
+    <script>
+        var Module = {
+            onRuntimeInitialized: function() {
+                document.getElementById('status').innerHTML = 
+                    'OpenCV.js is: <span style="color:green">LOADED</span>';
+                
+                let img = document.getElementById('imageSrc');
+                
+                // Process after image is loaded
+                if (img.complete) {
+                    processImage();
+                } else {
+                    img.onload = processImage;
+                }
+            }
+        };
+
+        function processImage() {
+            try {
+                let img = document.getElementById('imageSrc');
+                let src = cv.imread(img);
+                let dst = new cv.Mat();
+                cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
+                cv.imshow('canvasOutput', dst);
+                src.delete();
+                dst.delete();
+            } catch (err) {
+                document.getElementById('status').innerHTML += 
+                    '<br>Processing error: ' + err.message;
+            }
+        }
+    </script>
+    <script async src="opencv.js"></script>
+</body>
+</html>
