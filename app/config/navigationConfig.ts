@@ -35,4 +35,14 @@ export const navigationCategories = {
       { name: "Advanced Detection", path: "/opencv/detection/image" },
     ],
   },
+  colorAnalysis: {
+    title: "Color Analysis",
+    items: [
+      { name: "Color Histogram", path: "/opencv/color/histogram" },
+      { name: "Color Ratio Analysis", path: "/opencv/color/ratio" },
+      { name: "Color Value Display", path: "/opencv/color/values" },
+      { name: "Color Masking", path: "/opencv/color/mask" },
+      { name: "Color Segmentation", path: "/opencv/color/segmentation" },
+    ],
+  },
 };
