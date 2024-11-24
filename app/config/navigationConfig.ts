@@ -45,4 +45,21 @@ export const navigationCategories = {
       { name: "Color Segmentation", path: "/opencv/color/segmentation" },
     ],
   },
+  scientificAnalysis: {
+    title: "Scientific Imaging",
+    items: [
+      { name: "Basic OCR Analysis", path: "/opencv/scientific/ocr" },
+      { name: "Gel Electrophoresis", path: "/opencv/scientific/gel" },
+      {
+        name: "Western Blot Fluorescence",
+        path: "/opencv/scientific/fl_western",
+      },
+      {
+        name: "Western Blot Black & White",
+        path: "/opencv/scientific/bw_western",
+      },
+      { name: "Cell & Colony Counter", path: "/opencv/scientific/colony" },
+      { name: "Microscopy Analysis", path: "/opencv/scientific/microscopy" },
+    ],
+  },
 };
