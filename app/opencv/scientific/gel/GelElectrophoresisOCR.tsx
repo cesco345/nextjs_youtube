@@ -1,16 +1,14 @@
-// app/opencv/document/gel/GelElectrophoresisOCR.tsx
-"use client";
-
+// File: components/GelElectrophoresisOCR.tsx
 import React, { useRef, useState, useCallback } from "react";
 import { useOpenCV } from "../../../hooks/opencv/useOpenCV";
 import ImageUpload from "../../../components/opencv/ImageUpload";
 import ThresholdControls from "../../controls/ThresholdControls";
-import Tesseract from "tesseract.js";
-
-interface Position {
-  x: number;
-  y: number;
-}
+import { Position, ProcessingParams, GelAnalysis } from "./types/gel";
+import * as canvasUtils from "./utils/canvasUtils";
+import * as imageProcessing from "./utils/imageProcessing";
+import * as gelAnalysis from "./utils/gelAnalysis";
+import * as visualization from "./utils/visualization";
+import { generateAnalysisText } from "./utils/analysisText";
 
 const GelElectrophoresisOCR: React.FC = () => {
   const { cvLoaded, error: cvError } = useOpenCV();
@@ -22,7 +20,7 @@ const GelElectrophoresisOCR: React.FC = () => {
   const [startPosition, setStartPosition] = useState<Position | null>(null);
   const [endPosition, setEndPosition] = useState<Position | null>(null);
 
-  const [params, setParams] = useState({
+  const [params, setParams] = useState<ProcessingParams>({
     threshold: 5,
     resizefactor: 2,
     useotsu: true,
@@ -161,6 +159,165 @@ const GelElectrophoresisOCR: React.FC = () => {
     setParams((prev) => ({ ...prev, [name]: value }));
   }, []);
 
+  const analyzeGel = async (binary: any, width: number, height: number) => {
+    const contours = new window.cv.MatVector();
+    const hierarchy = new window.cv.Mat();
+
+    try {
+      // Find contours
+      window.cv.findContours(
+        binary,
+        contours,
+        hierarchy,
+        window.cv.RETR_EXTERNAL,
+        window.cv.CHAIN_APPROX_SIMPLE
+      );
+
+      // Create vertical intensity profile to detect lanes
+      const profile = new Array(width).fill(0);
+      for (let x = 0; x < width; x++) {
+        for (let y = 0; y < height; y++) {
+          profile[x] += binary.ucharPtr(y, x)[0];
+        }
+      }
+
+      // Detect lanes using peaks in the profile
+      const lanes: any[] = [];
+      let globalMaxIntensity = 0;
+      let inLane = false;
+      let laneStart = 0;
+      const minLaneWidth = Math.floor(width * 0.03);
+      const threshold = Math.max(...profile) * 0.1;
+
+      // Find lane boundaries
+      for (let x = 0; x < width; x++) {
+        if (!inLane && profile[x] > threshold) {
+          inLane = true;
+          laneStart = x;
+        } else if (inLane && (profile[x] <= threshold || x === width - 1)) {
+          const laneWidth = x - laneStart;
+          if (laneWidth >= minLaneWidth) {
+            lanes.push({
+              laneNumber: lanes.length + 1,
+              startX: laneStart,
+              endX: x,
+              bands: [],
+              maxIntensity: 0,
+            });
+          }
+          inLane = false;
+        }
+      }
+
+      // Process detected lanes
+      const analysis = await processLanes(
+        lanes,
+        contours,
+        globalMaxIntensity,
+        height
+      );
+      return analysis;
+    } finally {
+      contours.delete();
+      hierarchy.delete();
+    }
+  };
+
+  const processLanes = async (
+    lanes: any[],
+    contours: any,
+    globalMaxIntensity: number,
+    height: number
+  ) => {
+    // Group contours into detected lanes
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const area = window.cv.contourArea(contour);
+      const minArea = contours.size() * height * 0.0001;
+
+      if (area > minArea) {
+        const moments = window.cv.moments(contour);
+        const centerX = moments.m10 / moments.m00;
+        const centerY = moments.m01 / moments.m00;
+        const rect = window.cv.boundingRect(contour);
+
+        const lane = lanes.find((l) => centerX >= l.startX && centerX < l.endX);
+
+        if (lane) {
+          const band = {
+            position: centerY,
+            intensity: moments.m00 / area,
+            estimatedWeight: 0,
+            area: area,
+            width: rect.width,
+            height: rect.height,
+            centerX: centerX,
+            centerY: centerY,
+          };
+
+          lane.bands.push(band);
+          lane.maxIntensity = Math.max(lane.maxIntensity, band.intensity);
+          globalMaxIntensity = Math.max(globalMaxIntensity, band.intensity);
+        }
+      }
+      contour.delete();
+    }
+
+    // Sort bands in each lane
+    lanes.forEach((lane) => {
+      lane.bands.sort((a: any, b: any) => a.position - b.position);
+    });
+
+    // Identify standard lane and calculate weights
+    const standardLane = gelAnalysis.findStandardLane(lanes);
+    const standardCurve = standardLane
+      ? gelAnalysis.detectStandards(standardLane, height)
+      : undefined;
+
+    if (standardCurve) {
+      calculateMolecularWeights(lanes, standardCurve, height);
+    }
+
+    return {
+      standardCurve,
+      lanes,
+      globalMaxIntensity,
+    };
+  };
+
+  const calculateMolecularWeights = (
+    lanes: any[],
+    standardCurve: any[],
+    height: number
+  ) => {
+    lanes.forEach((lane) => {
+      lane.bands.forEach((band: any) => {
+        const pos = band.position;
+        let higher = standardCurve[0];
+        let lower = standardCurve[standardCurve.length - 1];
+
+        for (let i = 0; i < standardCurve.length - 1; i++) {
+          if (
+            pos >= standardCurve[i].position &&
+            pos <= standardCurve[i + 1].position
+          ) {
+            higher = standardCurve[i];
+            lower = standardCurve[i + 1];
+            break;
+          }
+        }
+
+        const fraction =
+          (pos - higher.position) / (lower.position - higher.position);
+        const logWeight =
+          Math.log10(higher.weight) +
+          fraction * (Math.log10(lower.weight) - Math.log10(higher.weight));
+
+        band.estimatedWeight = Math.pow(10, logWeight);
+      });
+    });
+  };
+
   const processSelection = useCallback(async () => {
     if (
       !cvLoaded ||
@@ -175,253 +332,55 @@ const GelElectrophoresisOCR: React.FC = () => {
     setProcessing(true);
     setError(null);
 
-    // Initialize OpenCV Mats
     let src: any = null;
     let processed: any = null;
-    let normalized: any = null;
     let binary: any = null;
-    let contours: any = null;
-    let hierarchy: any = null;
 
     try {
-      const x = Math.min(startPosition.x, endPosition.x);
-      const y = Math.min(startPosition.y, endPosition.y);
-      const width = Math.abs(endPosition.x - startPosition.x);
-      const height = Math.abs(endPosition.y - startPosition.y);
+      const { x, y, width, height } = canvasUtils.getSelectionDimensions(
+        startPosition,
+        endPosition
+      );
 
-      if (width < 10 || height < 10) {
-        throw new Error("Selected area is too small");
-      }
+      const tempCanvas = await canvasUtils.createProcessingCanvas(
+        x,
+        y,
+        width,
+        height,
+        outputCanvasRef
+      );
 
-      // Create temporary canvas
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = width;
-      tempCanvas.height = height;
-
-      const tempCtx = tempCanvas.getContext("2d", { willReadFrequently: true });
-      if (!tempCtx) throw new Error("Failed to create temporary context");
-
-      const sourceCtx = outputCanvasRef.current.getContext("2d");
-      if (!sourceCtx) throw new Error("Failed to get source context");
-
-      // Copy the selected area
-      const imageData = sourceCtx.getImageData(x, y, width, height);
-      tempCtx.putImageData(imageData, 0, 0);
-
-      // Read source image
       src = window.cv.imread(tempCanvas);
-      processed = new window.cv.Mat();
+      processed = await imageProcessing.preprocessImage(src, params);
+      binary = await imageProcessing.createBinaryImage(processed, params);
 
-      // Convert to grayscale
-      window.cv.cvtColor(src, processed, window.cv.COLOR_RGBA2GRAY);
-
-      // Normalize the image
-      normalized = new window.cv.Mat();
-      window.cv.normalize(processed, normalized, 0, 255, window.cv.NORM_MINMAX);
-
-      // Apply threshold to detect bands
-      binary = new window.cv.Mat();
-      window.cv.threshold(
-        normalized,
-        binary,
-        0,
-        255,
-        window.cv.THRESH_BINARY_INV + window.cv.THRESH_OTSU
+      const analysis = await analyzeGel(binary, width, height);
+      const result = await visualization.visualizeResults(
+        analysis,
+        width,
+        height
       );
+      const text = generateAnalysisText(analysis, height);
 
-      // Find contours of bands
-      contours = new window.cv.MatVector();
-      hierarchy = new window.cv.Mat();
-      window.cv.findContours(
-        binary,
-        contours,
-        hierarchy,
-        window.cv.RETR_EXTERNAL,
-        window.cv.CHAIN_APPROX_SIMPLE
-      );
-
-      // Process contours to find band positions and characteristics
-      let bands = [];
-      for (let i = 0; i < contours.size(); i++) {
-        const contour = contours.get(i);
-        const area = window.cv.contourArea(contour);
-
-        // Filter out noise by area
-        if (area > 50) {
-          const moments = window.cv.moments(contour);
-          const centerY = moments.m01 / moments.m00;
-          const centerX = moments.m10 / moments.m00;
-          const rect = window.cv.boundingRect(contour);
-
-          // Calculate band intensity
-          const roi = normalized.roi(rect);
-          const mean = window.cv.mean(roi);
-          roi.delete();
-
-          // Calculate band shape characteristics
-          const perimeter = window.cv.arcLength(contour, true);
-          const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-
-          bands.push({
-            y: centerY,
-            x: centerX,
-            width: rect.width,
-            height: rect.height,
-            area: area,
-            intensity: mean[0],
-            perimeter: perimeter,
-            circularity: circularity,
-            rect: rect,
-          });
-
-          contour.delete();
-        }
-      }
-
-      // Sort bands by position (top to bottom)
-      bands.sort((a, b) => a.y - b.y);
-
-      // Calculate inter-band distances and statistics
-      const bandDistances = [];
-      for (let i = 1; i < bands.length; i++) {
-        bandDistances.push(bands[i].y - bands[i - 1].y);
-      }
-
-      // Calculate average band characteristics
-      const avgIntensity =
-        bands.reduce((sum, band) => sum + band.intensity, 0) / bands.length;
-      const avgWidth =
-        bands.reduce((sum, band) => sum + band.width, 0) / bands.length;
-      const avgDistance =
-        bandDistances.length > 0
-          ? bandDistances.reduce((sum, dist) => sum + dist, 0) /
-            bandDistances.length
-          : 0;
-
-      // Draw result on processed image
-      let result = window.cv.Mat.zeros(height, width, window.cv.CV_8UC3);
-      window.cv.cvtColor(binary, result, window.cv.COLOR_GRAY2BGR);
-
-      // Draw detailed band analysis
-      for (let i = 0; i < bands.length; i++) {
-        const band = bands[i];
-        const y = band.y;
-
-        // Draw band outline
-        window.cv.rectangle(
-          result,
-          new window.cv.Point(band.rect.x, band.rect.y),
-          new window.cv.Point(
-            band.rect.x + band.rect.width,
-            band.rect.y + band.rect.height
-          ),
-          new window.cv.Scalar(0, 255, 0),
-          1
-        );
-
-        // Draw center line
-        window.cv.line(
-          result,
-          new window.cv.Point(0, y),
-          new window.cv.Point(width, y),
-          new window.cv.Scalar(255, 0, 0),
-          1
-        );
-
-        // Draw band number and position
-        const relativePos = ((y / height) * 100).toFixed(1);
-        window.cv.putText(
-          result,
-          `${i + 1}: ${relativePos}%`,
-          new window.cv.Point(5, y - 5),
-          window.cv.FONT_HERSHEY_SIMPLEX,
-          0.3,
-          new window.cv.Scalar(0, 255, 0),
-          1
-        );
-
-        // Draw intensity bar
-        const intensityWidth = (band.intensity / 255) * 30;
-        window.cv.rectangle(
-          result,
-          new window.cv.Point(width - 35, y - 5),
-          new window.cv.Point(width - 35 + intensityWidth, y - 2),
-          new window.cv.Scalar(0, 255, 255),
-          -1
-        );
-      }
-
-      // Show processed image
       if (processedCanvasRef.current) {
         window.cv.imshow(processedCanvasRef.current, result);
       }
-
-      // Prepare detailed analysis output
-      let processedText = "Comprehensive Band Analysis:\n";
-      processedText += `Number of bands detected: ${bands.length}\n\n`;
-
-      processedText += "Individual Band Analysis:\n";
-      bands.forEach((band, index) => {
-        const relativePos = ((band.y / height) * 100).toFixed(1);
-        const normalizedIntensity = ((band.intensity / 255) * 100).toFixed(1);
-
-        processedText += `\nBand ${index + 1}:\n`;
-        processedText += `  Position: ${relativePos}% from top\n`;
-        processedText += `  Intensity: ${normalizedIntensity}%\n`;
-        processedText += `  Width: ${band.width.toFixed(1)} pixels\n`;
-        processedText += `  Height: ${band.height.toFixed(1)} pixels\n`;
-        processedText += `  Area: ${band.area.toFixed(1)} pixels²\n`;
-        processedText += `  Circularity: ${band.circularity.toFixed(3)}\n`;
-
-        if (index > 0) {
-          const distance = bandDistances[index - 1].toFixed(1);
-          processedText += `  Distance from previous band: ${distance} pixels\n`;
-        }
-      });
-
-      processedText += "\nLane Statistics:\n";
-      processedText += `Average band intensity: ${(
-        (avgIntensity / 255) *
-        100
-      ).toFixed(1)}%\n`;
-      processedText += `Average band width: ${avgWidth.toFixed(1)} pixels\n`;
-      if (bandDistances.length > 0) {
-        processedText += `Average band spacing: ${avgDistance.toFixed(
-          1
-        )} pixels\n`;
-      }
-
-      // Add Rf values
-      processedText += "\nRelative Mobility (Rf values):\n";
-      const totalDistance = height;
-      bands.forEach((band, index) => {
-        const rf = (band.y / totalDistance).toFixed(3);
-        processedText += `Band ${index + 1}: ${rf}\n`;
-      });
-
-      setExtractedText(processedText);
-      result.delete();
+      setExtractedText(text);
     } catch (err) {
       console.error("Processing error:", err);
       setError(
         err instanceof Error ? err.message : "Error processing selection"
       );
     } finally {
-      // Cleanup
-      if (src) src.delete();
-      if (processed) processed.delete();
-      if (normalized) normalized.delete();
-      if (binary) binary.delete();
-      if (contours) contours.delete();
-      if (hierarchy) hierarchy.delete();
+      [src, processed, binary].forEach((mat) => {
+        if (mat) mat.delete();
+      });
       setProcessing(false);
     }
-  }, [cvLoaded, startPosition, endPosition, processing]);
+  }, [cvLoaded, startPosition, endPosition, processing, params]);
 
   return (
     <div className="min-h-screen p-4">
-      {/* <h1 className="text-2xl font-bold mb-4">Gel Electrophoresis Analysis</h1> */}
-
       {error && (
         <div className="mb-4 p-3 bg-red-100 text-red-700 rounded">{error}</div>
       )}
